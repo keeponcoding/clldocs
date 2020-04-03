@@ -1,4 +1,4 @@
 - Hadoop
-  - [hadoop支持lzo压缩](https://github.com/keeponcoding/clldocs/tree/master/docs/Hadoop/hadoop支持lzo压缩.md)
+  - [hadoop支持lzo压缩](Hadoop/hadoop支持lzo压缩.md)
 - Java基础
   - [集合](括号里是具体文档的路径地址)
