@@ -1,4 +1,9 @@
-- Hadoop
-  - [hadoop支持lzo压缩](Hadoop/hadoop支持lzo压缩.md)
-- Java基础
-  - [集合](括号里是具体文档的路径地址)
+- [Hadoop](Hadoop/hadoop.md)
+  - [# hadoop支持lzo压缩](Hadoop/hadoop支持lzo压缩.md)
+  - [# hadoop伪分布式部署](Hadoop/hadoop伪分布式部署.md)
+- [Spark](Spark/spark.md)
+  - [# Spark kryo序列化测试](Spark/spark使用序列化.md)
+  - [# Spark_on_Yarn-cluster和Yarn-client区别](Spark/Spark_on_Yarn-cluster和Yarn-client区别.md)
+- [Java基础](Java/java.md)
+  * [# 集合](Java/集合.md)
+

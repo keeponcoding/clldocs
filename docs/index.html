@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Document</title>
+  <title>clldocs</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
   <meta name="description" content="Description">
   <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
@@ -15,9 +15,16 @@
       name: '',
       repo: '',
       loadSidebar: true, // 开启侧边栏导航
-      coverpage: true // 封面信息展示
+      coverpage: true, // 封面信息展示
+      search: true,  // 开启搜索框
+      subMaxLevel: 2,  // 显示最大子层级数
+      name: '个人技术日志', // 文档标题 显示在侧边栏顶部
+      // loadNavbar: true,  // 加载顶部导航栏 默认加载 统计目录下的 _navbar.md  也可以自定义文件名 loadNavbar: 'nav.md'
+      mergeNavbar: true // 小屏设备下合并导航栏到侧边栏
     }
   </script>
   <script src="//unpkg.com/docsify/lib/docsify.min.js"></script>
+  <script src="//unpkg.com/docsify/lib/plugins/search.js"></script> <!-- 配合 search: true 使用 -->
+  <script src="//unpkg.com/docsify-copy-code"></script> <!--复制到粘贴板按钮-->
 </body>
 </html>
