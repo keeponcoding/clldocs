@@ -236,7 +236,7 @@ SortShuffleWirter  的实现大概就是这样，和 Hadoop MR 的实现相似
 1. 在 `SortShuffleWriter` 的 `PartitionedAppendOnlyMap` 或者 `PartitionedPairBuffer` 中，存储的是键值或者值的具体类型，也就是 Java 对象，是**反序列化**过后的数据。而在 `UnsafeShuffleWriter` 的 `ShuffleExternalSorter `中数据是**序列化**以后存储到实际的 Page 中，而且在写入数据过程中会额外写入长度信息。总体而言，序列化以后数据大小是远远小于序列化之前的数据
 2. `UnsafeShuffleWriter` 中需要额外的存储记录（LongArray），它保存着分区信息和实际指向序列化后数据的指针（经过编码的Page num 以及 Offset）。相对于 `SortShuffleWriter`， `UnsafeShuffleWriter` 中这部分存储的开销是额外的
 
-## 3.Spark Shuffle 中的数据结构
+## 3.Spark Shuffle 中的数据结构 
 
 `SortShuffleWriter` 中使用 `ExternalSorter` 来对内存中的数据进行排序，`ExternalSorter` 中缓存记录数据的数据结构有两种：
 
