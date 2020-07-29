@@ -45,7 +45,7 @@
   * 普通机制
   * ByPass 机制
 
-#### 1.3.1.HashShuffleManager
+#### 1.3.1.HashShuffle(弃用)
 
 **Spark2.0.0版本之后，移除了该 shuffle 机制**
 
@@ -114,7 +114,11 @@ executor num * reduce task num = 2 * 3 = 6
 
 相较于未开启 consolidate 机制已经大幅减少了文件数！！！
 
-#### 1.3.2.Sort-Based Shuffle
+但是在实际应用中，CPU 核数会很多，而且 reduce 任务数也很多，所以中间生成的文件仍然很多
+
+
+
+#### 1.3.2.SortShuffle
 
 _SortShuffle在Spark1.1引入_
 
@@ -155,7 +159,7 @@ _SortShuffle在Spark1.1引入_
 
 所以，启用该机制的最大好处在于，shuffle write 过程中，不需要进行数据的排序操作，也就节省了这部分的性能开销
 
-## 2.Sort-Based Shuffle
+## 2.SortShuffle
 
 spark2.0之后的版本，Hash Shuffle 已经退出
 
@@ -172,8 +176,20 @@ Shuffle 的生命周期是由 ShuffleManager 管理，在 ShuffleManager 中定�
 **该机制触发条件**
 
 1. shuffle reduce task的数量小于 `spark.shuffle.sort.bypassMergeThreshold` 参数的值（默认200）
-
 2. 没有map side aggregations，是指map端聚合操作，通常来说一些聚合类的算子都会都 map 端的 aggregation。不过对于 `groupByKey` 和`combineByKey`， 如果设定 `mapSideCombine` 为false，就不会有 map side aggregations
+
+```scala
+// We cannot bypass sorting if we need to do map-side aggregation.
+if (dep.mapSideCombine) {
+  require(dep.aggregator.isDefined, "Map-side combine without Aggregator specified!")
+  false
+} else {
+  val bypassMergeThreshold: Int = conf.getInt("spark.shuffle.sort.bypassMergeThreshold", 200)
+  dep.partitioner.numPartitions <= bypassMergeThreshold
+}
+```
+
+
 
 `BypassMergeSortShuffle` 适用于没有聚合，数据量不大的场景
 
@@ -274,7 +290,288 @@ SortShuffleWirter  的实现大概就是这样，和 Hadoop MR 的实现相似
 * 参数说明：如果使用HashShuffleManager，该参数有效。如果设置为true，那么就会开启consolidate机制，也就是开启优化后的HashShuffleManager。
 * 调优建议：如果的确不需要SortShuffleManager的排序机制，那么除了使用bypass机制，还可以尝试将spark.shffle.manager参数手动指定为hash，使用HashShuffleManager，同时开启consolidate机制。在实践中尝试过，发现其性能比开启了bypass机制的SortShuffleManager要高出10%~30%。
 
-## 4.对比 Hadoop MapReduce的Shuffle 和 Spark 的 Shuffle 过程
+## 4.源码分析
+
+_基于Spark1.6_
+
+从 executor 启动 task 入口开始
+
+`org.apache.spark.executor.CoarseGrainedExecutorBackend`
+
+```scala
+override def receive: PartialFunction[Any, Unit] = {
+  // TODO ...
+  // 启动任务
+  case LaunchTask(data) =>
+    if (executor == null) {
+      logError("Received LaunchTask command but executor was null")
+      System.exit(1)
+    } else {
+      val taskDesc = ser.deserialize[TaskDescription](data.value)
+      logInfo("Got assigned task " + taskDesc.taskId)
+      // executor 启动任务
+      executor.launchTask(this, taskId = taskDesc.taskId, attemptNumber = taskDesc.attemptNumber,
+        taskDesc.name, taskDesc.serializedTask)
+    }
+  // TODO ...  
+}
+```
+
+
+
+`org.apache.spark.executor.Executor`
+
+```scala
+def launchTask(
+    context: ExecutorBackend,
+    taskId: Long,
+    attemptNumber: Int,
+    taskName: String,
+    serializedTask: ByteBuffer): Unit = {
+  // 实例化 TaskRunner
+  val tr = new TaskRunner(context, taskId = taskId, attemptNumber = attemptNumber, taskName,
+    serializedTask)
+  runningTasks.put(taskId, tr)
+  // 启用线程池中的线程调用
+  threadPool.execute(tr)
+}
+```
+
+
+
+`org.apache.spark.executor.Executor.TaskRunner`  该类继承 `Runnable` 直接找到对应的 run 方法
+
+```scala
+override def run(): Unit = {
+  // ...
+  // 进入到 Task 类中的 run 方法 通过源码可以看出该方法内调用了对应的Task的实现类的 runTask 方法
+  val res = task.run(taskAttemptId = taskId,attemptNumber = attemptNumber,metricsSystem = env.metricsSystem)
+  // ...
+}  
+```
+
+
+
+`org.apache.spark.scheduler.Task` 该类的实现类为
+
+ `org.apache.spark.scheduler.ResultTask` 和 `org.apache.spark.scheduler.ShuffleMapTask`
+
+```scala
+// 由于该方法是 final 修饰的 所以实现类不可重写该方法 不过可以重写调用的 runTask 方法
+final def run(...){
+  (runTask(context), context.collectAccumulators())
+}
+def runTask(context: TaskContext): T
+```
+
+
+
+`org.apache.spark.scheduler.ShuffleMapTask` 
+
+```scala
+override def runTask(context: TaskContext): MapStatus = {
+  // ...
+  // 获取 ShuffleManager
+  val manager = SparkEnv.get.shuffleManager
+  /*
+   * 依据使用的 ShuffleManager 的子类的 handle 获取对应的 writer
+   * 当前版本使用的是 SortShuffleManager
+   */
+  writer = manager.getWriter[Any, Any](dep.shuffleHandle, partitionId, context)
+  /*
+   * rdd.iterator(partition, context) 是ShuffleRead部分  
+   * 先从上一个ShuffleMapTask读取再写出
+   */
+  writer.write(rdd.iterator(partition, context).asInstanceOf[Iterator[_ <: Product2[Any, Any]]])
+  writer.stop(success = true).get
+  // ...
+}
+```
+
+
+
+`org.apache.spark.shuffle.sort.SortShuffleManager`
+
+```scala
+override def registerShuffle[K, V, C](shuffleId: Int,
+      numMaps: Int,dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
+  if (SortShuffleWriter.shouldBypassMergeSort(SparkEnv.get.conf, dependency)) {
+    // byPass 模式 参考 org.apache.spark.shuffle.sort.SortShuffleWriter 源码
+    new BypassMergeSortShuffleHandle[K, V](
+      shuffleId, numMaps, dependency.asInstanceOf[ShuffleDependency[K, V, V]])
+  } else if (SortShuffleManager.canUseSerializedShuffle(dependency)) {
+    // 序列化
+    new SerializedShuffleHandle[K, V](
+      shuffleId, numMaps, dependency.asInstanceOf[ShuffleDependency[K, V, V]])
+  } else {
+    // 以上条件都不满足
+    new BaseShuffleHandle(shuffleId, numMaps, dependency)
+  }
+}
+
+/*
+ * 如果要返回true   
+ * 那么需要满足 支持 Serialzed relocation  
+ * 且 不需要聚合操作 
+ * 且 分区数小于 16777215 + 1
+ */
+def canUseSerializedShuffle(dependency: ShuffleDependency[_, _, _]): Boolean = {
+  val shufId = dependency.shuffleId
+  val numPartitions = dependency.partitioner.numPartitions
+  val serializer = Serializer.getSerializer(dependency.serializer)
+  // 是否支持 Serialzed relocation
+  if (!serializer.supportsRelocationOfSerializedObjects) {
+    false  
+  } else if (dependency.aggregator.isDefined) { // 是否需要聚合操作
+    false
+  } else if (numPartitions > MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE) {
+    // MAX_SHUFFLE_OUTPUT_PARTITIONS_FOR_SERIALIZED_MODE = 16777215 + 1
+    false
+  } else {
+    true
+  }
+}
+
+/*
+ * org.apache.spark.shuffle.sort.SortShuffleWriter
+ */
+private[spark] object SortShuffleWriter {
+  def shouldBypassMergeSort(conf: SparkConf, dep: ShuffleDependency[_, _, _]): Boolean = {
+    // 是否是 map-side aggregation 类算子
+    if (dep.mapSideCombine) {
+      require(dep.aggregator.isDefined, "Map-side combine without Aggregator specified!")
+      false
+    } else {
+      // 分区数是否 小于等于 spark.shuffle.sort.bypassMergeThreshold 默认为200
+      val bypassMergeThreshold: Int = conf.getInt("spark.shuffle.sort.bypassMergeThreshold", 200)
+      dep.partitioner.numPartitions <= bypassMergeThreshold
+    }
+  }
+}
+
+// 依据不同的handle 创建对应的writer实例对象
+override def getWriter[K, V](handle: ShuffleHandle,
+    mapId: Int,context: TaskContext): ShuffleWriter[K, V] = {
+  // ...
+  handle match {
+    case unsafeShuffleHandle: SerializedShuffleHandle[K @unchecked, V @unchecked] =>
+      new UnsafeShuffleWriter(...)
+    case bypassMergeSortHandle: BypassMergeSortShuffleHandle[K @unchecked, V @unchecked] =>
+      new BypassMergeSortShuffleWriter(...)
+    case other: BaseShuffleHandle[K @unchecked, V @unchecked, _] =>
+      new SortShuffleWriter(...)
+  }
+}
+```
+
+
+
+`org.apache.spark.rdd.ShuffledRDD`
+
+```scala
+override def compute(split: Partition, context: TaskContext): Iterator[(K, C)] = {
+  val dep = dependencies.head.asInstanceOf[ShuffleDependency[K, V, C]]
+  // 获取 Reader 读取数据
+  SparkEnv.get.shuffleManager.getReader(dep.shuffleHandle, split.index, split.index + 1, context)
+    .read()
+    .asInstanceOf[Iterator[(K, C)]]
+}
+```
+
+
+
+关于 ShuffleMapTask 进一步分析写
+
+以`org.apache.spark.shuffle.sort.SortShuffleWriter` 为例
+
+```scala
+/** Write a bunch of records to this task's output */
+override def write(records: Iterator[Product2[K, V]]): Unit = {
+  // ...
+  val output = shuffleBlockResolver.getDataFile(dep.shuffleId, mapId)
+  val tmp = Utils.tempFileWith(output)
+  val blockId = ShuffleBlockId(dep.shuffleId, mapId, IndexShuffleBlockResolver.NOOP_REDUCE_ID)
+  val partitionLengths = sorter.writePartitionedFile(blockId, tmp)
+  shuffleBlockResolver.writeIndexFileAndCommit(dep.shuffleId, mapId, partitionLengths, tmp)
+  mapStatus = MapStatus(blockManager.shuffleServerId, partitionLengths)
+}
+```
+
+
+
+`org.apache.spark.shuffle.IndexShuffleBlockResolver`
+
+```scala
+/*
+ * 整体逻辑就是把旧文件删除  并将新文件改名为旧文件的名称 
+ * 写出操作存在两个文件：索引文件 数据文件  类似于kafka的分段日志 提高了吞吐量
+ */
+def writeIndexFileAndCommit(...){
+  // ...
+  // 索引文件
+  val indexFile = getIndexFile(shuffleId, mapId)
+  val indexTmp = Utils.tempFileWith(indexFile)
+  // 数据文件
+  val dataFile = getDataFile(shuffleId, mapId)
+  // ...
+  synchronized {
+    // 检查索引文件和数据文件是否匹配  
+    val existingLengths = checkIndexAndDataFile(indexFile, dataFile, lengths.length)
+    if (existingLengths != null) {
+      // Another attempt for the same task has already written our map outputs successfully,
+      // so just use the existing partition lengths and delete our temporary map outputs.
+      System.arraycopy(existingLengths, 0, lengths, 0, lengths.length)
+      if (dataTmp != null && dataTmp.exists()) {
+        dataTmp.delete()
+      }
+      indexTmp.delete()
+    } else {
+      // 覆盖已存在的索引文件和数据文件
+      if (indexFile.exists()) {
+        indexFile.delete()
+      }
+      if (dataFile.exists()) {
+        dataFile.delete()
+      }
+      // 重命名
+      if (!indexTmp.renameTo(indexFile)) {
+        throw new IOException("fail to rename file " + indexTmp + " to " + indexFile)
+      }
+      // 重命名
+      if (dataTmp != null && dataTmp.exists() && !dataTmp.renameTo(dataFile)) {
+        throw new IOException("fail to rename file " + dataTmp + " to " + dataFile)
+      }
+    }
+  }
+}
+```
+
+
+
+以上是 ShuffleMapTask 部分
+
+以下是 ResultTask 源码
+
+ResultTask 只需要读取 ShuffleMapTask 数据即可，不需要写出
+
+`org.apache.spark.scheduler.ResultTask`
+
+```scala
+override def runTask(context: TaskContext): U = {
+  // ... 
+  // rdd.iterator(partition, context) 就是读取数据的核心代码
+  // rdd.iterator(partition, context) 源码部分也就是 上面的 ShuffleRDD 中的compute
+  func(context, rdd.iterator(partition, context))
+}
+```
+
+
+
+
+
+
+
+## 5.MapReduce 和 Spark 的 Shuffle 对比
 
 * 从 high-level 的角度
 
